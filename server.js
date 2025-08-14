@@ -1,105 +1,105 @@
-const express = require('express');
-const qrcode = require('qrcode');
-const { Client } = require('whatsapp-web.js');
-const { Pool } = require('pg');
+import { Client, LocalAuth } from 'whatsapp-web.js';
+import express from 'express';
+import qrcode from 'qrcode';
+import { Pool } from 'pg';
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL
+    connectionString: 'postgresql://neondb_owner:npg_FwNutc2nlxo3@ep-empty-star-aeqb2pfu-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 });
 
 let sessionData = null;
-let latestQRCode = null;
-let isClientReady = false;
 
-// ------------------- Base de datos -------------------
-async function loadSession() {
+// Inicializa el cliente de WhatsApp
+const client = new Client({
+    authStrategy: new LocalAuth({ clientId: 'client-one' }),
+    puppeteer: { headless: true }
+});
+
+client.on('qr', async qr => {
+    console.log('QR generado en consola');
     try {
-        const res = await pool.query('SELECT session_data FROM whatsapp_sessions ORDER BY id DESC LIMIT 1');
-        if (res.rows.length && res.rows[0].session_data) {
-            sessionData = res.rows[0].session_data;
-            console.log('Sesión cargada desde Neon ✅');
-        }
+        const qrImage = await qrcode.toDataURL(qr);
+        sessionData = { qr: qrImage }; // Guardamos temporalmente
     } catch (err) {
-        console.error('Error cargando sesión desde Neon:', err);
+        console.error('Error generando QR', err);
     }
-}
+});
 
+client.on('authenticated', async session => {
+    console.log('Cliente autenticado ✅');
+    sessionData = session;
+    await saveSession(sessionData);
+});
+
+client.on('ready', async () => {
+    console.log('WhatsApp listo ✅');
+
+    if (sessionData && !sessionData.saved) {
+        try {
+            // Si la sesión no se ha guardado, la guardamos
+            await saveSession(sessionData);
+            sessionData.saved = true;
+        } catch (err) {
+            console.error('Error guardando sesión:', err);
+        }
+    }
+});
+
+client.on('auth_failure', msg => {
+    console.error('Fallo de autenticación', msg);
+});
+
+client.initialize();
+
+// Función para guardar sesión en Neon
 async function saveSession(session) {
     if (!session) {
         console.log('No hay datos de sesión para guardar ❌');
         return;
     }
+
+    const query = `
+        INSERT INTO whatsapp_sessions (session_data, created_at, updated_at)
+        VALUES ($1, NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET session_data = EXCLUDED.session_data, updated_at = NOW()
+    `;
+
     try {
-        await pool.query(
-            'INSERT INTO whatsapp_sessions(session_data) VALUES($1)',
-            [session]
-        );
+        await pool.query(query, [JSON.stringify(session)]);
         console.log('Sesión guardada en Neon ✅');
     } catch (err) {
         console.error('Error guardando sesión en Neon:', err);
     }
 }
 
-// ------------------- Cliente WhatsApp -------------------
-const client = new Client({ session: sessionData });
-
-client.on('qr', (qr) => {
-    latestQRCode = qr;
-    console.log('QR generado en consola');
-});
-
-client.on('authenticated', async (session) => {
-    sessionData = session; // aseguramos que se actualice sessionData
-    await saveSession(session);
-});
-
-client.on('ready', async () => {
-    isClientReady = true;
-    console.log('WhatsApp listo ✅');
-});
-
-// ------------------- Inicializar -------------------
-(async () => {
-    await loadSession();
-    client.initialize();
-})();
-
-// ------------------- Endpoints -------------------
-
-// Enviar mensaje
+// Endpoint para enviar mensajes
 app.post('/send-message', async (req, res) => {
-    if (!isClientReady) return res.status(400).json({ error: 'Cliente WhatsApp no listo' });
-
     const { number, message } = req.body;
-    if (!number || !message) return res.status(400).json({ error: 'Faltan parámetros' });
+    if (!number || !message) return res.status(400).json({ error: 'Número y mensaje son requeridos' });
 
     try {
-        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-        await client.sendMessage(chatId, message);
+        const chat = await client.getChatById(`${number}@c.us`);
+        await chat.sendMessage(message);
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Página principal: muestra QR o estado
+// Endpoint para mostrar QR si no hay sesión
 app.get('/', async (req, res) => {
-    if (latestQRCode) {
-        const qrImage = await qrcode.toDataURL(latestQRCode);
-        res.send(`
-            <h2>Escanea este QR con WhatsApp Web</h2>
-            <img src="${qrImage}" />
-        `);
-    } else if (isClientReady) {
-        res.send('<h2>WhatsApp listo ✅</h2>');
+    if (sessionData?.qr) {
+        res.send(`<img src="${sessionData.qr}" alt="QR Code" />`);
     } else {
-        res.send('<h2>Esperando QR...</h2>');
+        res.send('WhatsApp conectado ✅');
     }
 });
 
-// ------------------- Iniciar servidor -------------------
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+    console.log(`Servidor corriendo en puerto ${PORT}`);
+});
