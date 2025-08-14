@@ -19,7 +19,7 @@ let isClientReady = false;
 async function loadSession() {
     try {
         const res = await pool.query('SELECT session_data FROM whatsapp_sessions ORDER BY id DESC LIMIT 1');
-        if (res.rows.length) {
+        if (res.rows.length && res.rows[0].session_data) {
             sessionData = res.rows[0].session_data;
             console.log('Sesión cargada desde Neon ✅');
         }
@@ -30,7 +30,7 @@ async function loadSession() {
 
 async function saveSession(session) {
     if (!session) {
-        console.log('No hay datos de sesión para guardar');
+        console.log('No hay datos de sesión para guardar ❌');
         return;
     }
     try {
@@ -53,24 +53,16 @@ client.on('qr', (qr) => {
 });
 
 client.on('authenticated', async (session) => {
+    sessionData = session; // aseguramos que se actualice sessionData
     await saveSession(session);
 });
 
 client.on('ready', async () => {
     isClientReady = true;
     console.log('WhatsApp listo ✅');
-
-    // Guardar sesión si no estaba previamente cargada
-    if (!sessionData) {
-        try {
-            const session = client.session || null;
-            if (session) await saveSession(session);
-        } catch (err) {
-            console.error('Error guardando sesión en ready:', err);
-        }
-    }
 });
 
+// ------------------- Inicializar -------------------
 (async () => {
     await loadSession();
     client.initialize();
