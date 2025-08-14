@@ -13,7 +13,7 @@ const pool = new Pool({
   connectionString: 'postgresql://neondb_owner:npg_FwNutc2nlxo3@ep-empty-star-aeqb2pfu-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
 });
 
-// Creamos tabla si no existe
+// Crear tabla si no existe
 await pool.query(`
 CREATE TABLE IF NOT EXISTS whatsapp_sessions (
     id SERIAL PRIMARY KEY,
@@ -32,11 +32,16 @@ async function saveSession(session) {
 
   try {
     const sessionString = JSON.stringify(session);
-    // Upsert: si ya hay sesión, actualizamos
+
+    // Upsert: insertar o actualizar
     await pool.query(
-      `INSERT INTO whatsapp_sessions (session_data)
-       VALUES ($1)
-       ON CONFLICT (id) DO UPDATE SET session_data = EXCLUDED.session_data, updated_at = NOW()`,
+      `
+      INSERT INTO whatsapp_sessions (id, session_data)
+      VALUES (1, $1)
+      ON CONFLICT (id) DO UPDATE
+      SET session_data = EXCLUDED.session_data,
+          updated_at = NOW()
+      `,
       [sessionString]
     );
     console.log('Sesión guardada en Neon ✅');
@@ -50,11 +55,12 @@ const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'whatsapp-server' }),
 });
 
+// Evento QR
 client.on('qr', async (qr) => {
   console.log('QR generado en consola');
   try {
     const qrImage = await qrcode.toDataURL(qr);
-    // Puedes servirlo en la ruta principal
+    // Servir el QR en la ruta principal
     app.get('/', (req, res) => {
       res.send(`<img src="${qrImage}"/>`);
     });
@@ -63,16 +69,20 @@ client.on('qr', async (qr) => {
   }
 });
 
+// Evento ready
 client.on('ready', async () => {
   console.log('WhatsApp listo ✅');
+  // Guardar la sesión
   const session = client.authStrategy?.state || null;
   await saveSession(session);
 });
 
+// Manejo de fallos de autenticación
 client.on('auth_failure', (msg) => {
   console.error('Fallo de autenticación:', msg);
 });
 
+// Mensajes entrantes
 client.on('message', (msg) => {
   console.log('Mensaje recibido de', msg.from, ':', msg.body);
 });
@@ -80,7 +90,8 @@ client.on('message', (msg) => {
 // Ruta para enviar mensaje
 app.post('/send-message', async (req, res) => {
   const { number, message } = req.body;
-  if (!number || !message) return res.status(400).json({ error: 'Número y mensaje son requeridos' });
+  if (!number || !message)
+    return res.status(400).json({ error: 'Número y mensaje son requeridos' });
 
   try {
     const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
@@ -92,10 +103,11 @@ app.post('/send-message', async (req, res) => {
   }
 });
 
-// Iniciamos servidor
+// Iniciar servidor
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
 
+// Inicializar WhatsApp
 client.initialize();
