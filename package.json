@@ -1,19 +1,20 @@
 {
-  "name": "whatsapp-server",
+  "name": "whatsapp-bot",
   "version": "1.0.0",
-  "main": "server.js",
-  "type": "module",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
+    "@wppconnect-team/wppconnect-store-mongo": "^1.3.0",
+    "dotenv": "^16.0.3",
     "express": "^4.18.2",
-    "whatsapp-web.js": "^1.21.0",
-    "qrcode": "^1.5.3",
-    "pg": "^8.11.3"
+    "mongoose": "^7.6.5",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.19.4"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.0.0"
   }
 }
