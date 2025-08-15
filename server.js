@@ -1,7 +1,7 @@
 import express from 'express';
 import qrcode from 'qrcode';
 import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
+const { Client, RemoteAuth } = pkg;
 import pkgPg from 'pg';
 const { Pool } = pkgPg;
 
@@ -23,8 +23,8 @@ async function initDatabase() {
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS whatsapp_sessions (
-          id INTEGER PRIMARY KEY DEFAULT 1,
-          session_data JSONB,
+          id VARCHAR(255) PRIMARY KEY,
+          session_data BYTEA,
           created_at TIMESTAMP DEFAULT NOW(),
           updated_at TIMESTAMP DEFAULT NOW()
       )
@@ -35,79 +35,90 @@ async function initDatabase() {
   }
 }
 
-// Custom Auth Strategy que guarda directamente en PostgreSQL
-class PostgreSQLAuth {
-  constructor() {
-    this.clientId = 'whatsapp-session';
-  }
-
-  async logout() {
+// Store personalizado para RemoteAuth con PostgreSQL
+class PostgreSQLStore {
+  async sessionExists(options) {
     try {
-      await pool.query('DELETE FROM whatsapp_sessions WHERE id = 1');
-      console.log('🗑️ Sesión eliminada de la base de datos');
+      const sessionId = options.sessionId || 'default-session';
+      const result = await pool.query(
+        'SELECT session_data FROM whatsapp_sessions WHERE id = $1',
+        [sessionId]
+      );
+      
+      const exists = result.rows.length > 0 && result.rows[0].session_data;
+      console.log(`🔍 Sesión ${sessionId} existe: ${exists ? 'SÍ' : 'NO'}`);
+      return !!exists;
     } catch (err) {
-      console.error('❌ Error eliminando sesión:', err);
+      console.error('❌ Error verificando sesión:', err);
+      return false;
     }
   }
 
-  async destroy() {
-    await this.logout();
-  }
-
-  async getAuthEventPayload() {
-    return { clientId: this.clientId };
-  }
-
-  async beforeBrowserInitialized() {
-    // No necesitamos hacer nada aquí
-    return;
-  }
-
-  async afterBrowserInitialized() {
-    // Cargar sesión existente si la hay
+  async save(options) {
     try {
-      const result = await pool.query('SELECT session_data FROM whatsapp_sessions WHERE id = 1');
-      if (result.rows.length > 0 && result.rows[0].session_data) {
-        const sessionData = result.rows[0].session_data;
-        console.log('✅ Sesión encontrada en base de datos');
-        return sessionData;
+      const sessionId = options.sessionId || 'default-session';
+      const sessionData = options.sessionData;
+      
+      if (!sessionData) {
+        console.log('⚠️ No hay datos de sesión para guardar');
+        return;
       }
-    } catch (err) {
-      console.error('❌ Error cargando sesión:', err);
-    }
-    return null;
-  }
 
-  async onAuthenticationNeeded() {
-    console.log('🔐 Autenticación necesaria');
-    return {
-      failed: false,
-      restart: false,
-      failureEventPayload: null
-    };
-  }
-
-  async saveSession(session) {
-    try {
+      // Convertir Buffer a bytea para PostgreSQL
       await pool.query(
         `INSERT INTO whatsapp_sessions (id, session_data, updated_at)
-         VALUES (1, $1, NOW())
+         VALUES ($1, $2, NOW())
          ON CONFLICT (id) DO UPDATE
          SET session_data = EXCLUDED.session_data,
              updated_at = NOW()`,
-        [JSON.stringify(session)]
+        [sessionId, sessionData]
       );
-      console.log('💾 Sesión guardada en base de datos');
+      
+      console.log(`💾 Sesión ${sessionId} guardada en PostgreSQL`);
     } catch (err) {
       console.error('❌ Error guardando sesión:', err);
     }
   }
+
+  async extract(options) {
+    try {
+      const sessionId = options.sessionId || 'default-session';
+      const result = await pool.query(
+        'SELECT session_data FROM whatsapp_sessions WHERE id = $1',
+        [sessionId]
+      );
+      
+      if (result.rows.length > 0 && result.rows[0].session_data) {
+        console.log(`✅ Sesión ${sessionId} cargada desde PostgreSQL`);
+        return result.rows[0].session_data;
+      }
+      
+      console.log(`ℹ️ No hay sesión guardada para ${sessionId}`);
+      return null;
+    } catch (err) {
+      console.error('❌ Error cargando sesión:', err);
+      return null;
+    }
+  }
+
+  async delete(options) {
+    try {
+      const sessionId = options.sessionId || 'default-session';
+      await pool.query('DELETE FROM whatsapp_sessions WHERE id = $1', [sessionId]);
+      console.log(`🗑️ Sesión ${sessionId} eliminada`);
+    } catch (err) {
+      console.error('❌ Error eliminando sesión:', err);
+    }
+  }
 }
 
-// Configuración del cliente de WhatsApp SIN RemoteAuth
+// Configuración del cliente de WhatsApp con RemoteAuth + PostgreSQL
+const store = new PostgreSQLStore();
 const client = new Client({
-  authStrategy: new LocalAuth({
-    clientId: 'whatsapp-session'
+  authStrategy: new RemoteAuth({
+    store: store,
+    backupSyncIntervalMs: 300000, // Backup cada 5 minutos
+    clientId: 'whatsapp-main-session'
   }),
   puppeteer: {
     headless: true,
@@ -126,9 +137,6 @@ const client = new Client({
   }
 });
 
-// Custom session management usando los eventos del cliente
-let customAuth = new PostgreSQLAuth();
-
 // Event handlers
 client.on('qr', async (qr) => {
   console.log('📱 Código QR generado - Escanea con WhatsApp');
@@ -143,13 +151,10 @@ client.on('qr', async (qr) => {
   }
 });
 
-client.on('authenticated', async (session) => {
+client.on('authenticated', () => {
   console.log('🔐 Cliente autenticado correctamente');
   clientStatus = 'AUTHENTICATED';
   lastStatusUpdate = new Date().toISOString();
-  
-  // Guardar sesión en PostgreSQL
-  await customAuth.saveSession(session);
 });
 
 client.on('auth_failure', (msg) => {
@@ -177,20 +182,29 @@ client.on('disconnected', (reason) => {
   clientStatus = 'DISCONNECTED';
   lastStatusUpdate = new Date().toISOString();
   
-  // Intentar reconectar después de 10 segundos
-  setTimeout(() => {
-    console.log('🔄 Intentando reconectar...');
-    clientStatus = 'RECONNECTING';
-    client.initialize();
-  }, 10000);
+  // Intentar reconectar después de 10 segundos (excepto si fue logout)
+  if (reason !== 'LOGOUT') {
+    setTimeout(() => {
+      console.log('🔄 Intentando reconectar...');
+      clientStatus = 'RECONNECTING';
+      client.initialize();
+    }, 10000);
+  }
 });
 
 client.on('message', (msg) => {
   console.log(`📨 Mensaje de ${msg.from}: ${msg.body}`);
 });
 
+client.on('remote_session_saved', () => {
+  console.log('💾 Sesión remota guardada automáticamente');
+});
+
 // Rutas del servidor
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+  // Verificar si hay sesión guardada
+  const hasSession = await store.sessionExists({ sessionId: 'whatsapp-main-session' });
+  
   const html = `
     <!DOCTYPE html>
     <html>
@@ -205,6 +219,7 @@ app.get('/', (req, res) => {
             .loading { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
             .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
             .qr { background: #cce5ff; color: #004085; border: 1px solid #99ccff; }
+            .session-info { background: #e7f3ff; padding: 10px; border-radius: 5px; margin: 10px 0; }
             img { max-width: 100%; height: auto; margin: 20px 0; }
             .info { margin: 10px 0; }
         </style>
@@ -218,10 +233,14 @@ app.get('/', (req, res) => {
             <div class="info">
                 <strong>Última actualización:</strong> ${lastStatusUpdate}
             </div>
+            <div class="session-info">
+                <strong>Sesión persistente:</strong> ${hasSession ? '✅ Guardada en PostgreSQL' : '❌ No encontrada'}
+            </div>
             ${qrCodeData ? `
                 <div class="qr">
                     <h3>📱 Escanea este código QR con WhatsApp:</h3>
                     <img src="${qrCodeData}" alt="QR Code"/>
+                    <p><em>Esta sesión se guardará permanentemente</em></p>
                     <p><em>La página se actualiza automáticamente cada 5 segundos</em></p>
                 </div>
             ` : ''}
@@ -232,6 +251,7 @@ app.get('/', (req, res) => {
                 <li><code>GET /status</code> - Estado del cliente</li>
                 <li><code>POST /logout</code> - Cerrar sesión</li>
                 <li><code>POST /reset</code> - Resetear sesión</li>
+                <li><code>GET /session-info</code> - Info de sesión</li>
             </ul>
         </div>
     </body>
@@ -265,13 +285,31 @@ function getStatusMessage(status) {
   return messages[status] || status;
 }
 
+// Ruta para info de sesión
+app.get('/session-info', async (req, res) => {
+  try {
+    const hasSession = await store.sessionExists({ sessionId: 'whatsapp-main-session' });
+    res.json({
+      hasSession,
+      sessionId: 'whatsapp-main-session',
+      storage: 'PostgreSQL (Neon)',
+      persistent: true
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Ruta para estado del cliente
-app.get('/status', (req, res) => {
+app.get('/status', async (req, res) => {
+  const hasSession = await store.sessionExists({ sessionId: 'whatsapp-main-session' });
   res.json({
     status: clientStatus,
     lastUpdate: lastStatusUpdate,
     hasQR: !!qrCodeData,
-    isReady: clientStatus === 'READY'
+    isReady: clientStatus === 'READY',
+    hasSession,
+    persistent: true
   });
 });
 
@@ -318,7 +356,6 @@ app.post('/send-message', async (req, res) => {
 app.post('/logout', async (req, res) => {
   try {
     await client.logout();
-    await customAuth.logout();
     clientStatus = 'DISCONNECTED';
     lastStatusUpdate = new Date().toISOString();
     qrCodeData = null;
@@ -333,7 +370,7 @@ app.post('/logout', async (req, res) => {
 app.post('/reset', async (req, res) => {
   try {
     await client.destroy();
-    await customAuth.logout();
+    await store.delete({ sessionId: 'whatsapp-main-session' });
     
     clientStatus = 'INITIALIZING';
     lastStatusUpdate = new Date().toISOString();
@@ -344,7 +381,7 @@ app.post('/reset', async (req, res) => {
       client.initialize();
     }, 2000);
     
-    res.json({ success: true, message: 'Sesión reseteada' });
+    res.json({ success: true, message: 'Sesión reseteada completamente' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
