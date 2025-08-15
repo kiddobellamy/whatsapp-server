@@ -1,29 +1,34 @@
 import express from 'express';
 import qrcode from 'qrcode';
-import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth } = pkg;
-import pkgPg from 'pg';
-const { Pool } = pkgPg;
+import { Client, LocalAuth } from 'whatsapp-web.js';
+import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import winston from 'winston';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
+import expressStatusMonitor from 'express-status-monitor';
 
 // Configuración de entorno
 dotenv.config();
 
 // Configuración de logger
 const logger = winston.createLogger({
-  level: 'info',
+  level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.json()
   ),
   transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' })
+    new winston.transports.Console({
+      format: winston.format.simple()
+    }),
+    new winston.transports.File({ 
+      filename: 'logs/error.log', 
+      level: 'error' 
+    }),
+    new winston.transports.File({ 
+      filename: 'logs/combined.log' 
+    })
   ]
 });
 
@@ -36,11 +41,11 @@ const app = express();
 app.use(express.json());
 
 // Middleware de monitorización
-app.use(require('express-status-monitor')());
+app.use(expressStatusMonitor());
 
-// Configuración de PostgreSQL / Neon
+// Configuración de PostgreSQL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_FwNutc2nlxo3@ep-empty-star-aeqb2pfu-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
+  connectionString: process.env.DATABASE_URL,
   ssl: {
     rejectUnauthorized: false
   }
@@ -57,17 +62,17 @@ async function initializeDatabase() {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    logger.info('Base de datos inicializada correctamente');
+    logger.info('Database initialized successfully');
   } catch (err) {
-    logger.error('Error inicializando base de datos:', err);
+    logger.error('Error initializing database:', err);
     process.exit(1);
   }
 }
 
-// Función para guardar sesión mejorada
+// Función para guardar sesión
 async function saveSession(session) {
   if (!session) {
-    logger.warn('No hay datos de sesión para guardar');
+    logger.warn('No session data to save');
     return;
   }
 
@@ -83,12 +88,11 @@ async function saveSession(session) {
       [sessionString]
     );
     
-    logger.info('Sesión guardada correctamente', { 
-      rowsAffected: result.rowCount,
-      updatedAt: result.rows[0]?.updated_at 
+    logger.info('Session saved successfully', { 
+      rowsAffected: result.rowCount 
     });
   } catch (err) {
-    logger.error('Error guardando sesión:', err);
+    logger.error('Error saving session:', err);
     throw err;
   }
 }
@@ -96,18 +100,19 @@ async function saveSession(session) {
 // Función para cargar sesión
 async function loadSession() {
   try {
-    const result = await pool.query('SELECT session_data FROM whatsapp_sessions WHERE id = 1');
-    if (result.rows.length > 0) {
-      return JSON.parse(result.rows[0].session_data);
-    }
-    return null;
+    const result = await pool.query(
+      'SELECT session_data FROM whatsapp_sessions WHERE id = 1'
+    );
+    return result.rows[0]?.session_data 
+      ? JSON.parse(result.rows[0].session_data) 
+      : null;
   } catch (err) {
-    logger.error('Error cargando sesión:', err);
+    logger.error('Error loading session:', err);
     return null;
   }
 }
 
-// Configuración del cliente de WhatsApp con manejo mejorado de sesiones
+// Configuración del cliente de WhatsApp
 const client = new Client({
   authStrategy: new LocalAuth({ 
     clientId: 'whatsapp-server',
@@ -137,100 +142,112 @@ let connectionStatus = {
   isConnected: false,
   isAuthenticated: false,
   isSyncing: false,
-  lastSync: null
+  lastSync: null,
+  qrGenerated: false
 };
 
-// Evento QR mejorado
+// Evento QR
 client.on('qr', async (qr) => {
   connectionStatus.isConnected = false;
   connectionStatus.isAuthenticated = false;
+  connectionStatus.qrGenerated = true;
   
-  logger.info('QR generado - Esperando escaneo');
+  logger.info('QR code generated - waiting for scan');
   
   try {
     const qrImage = await qrcode.toDataURL(qr);
     app.get('/', (req, res) => {
       res.send(`
-        <div style="text-align: center; margin-top: 50px;">
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>WhatsApp Web Server</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+            .status { margin: 20px auto; padding: 15px; max-width: 500px; border: 1px solid #ddd; border-radius: 5px; }
+            .qr-container { margin: 20px auto; }
+          </style>
+        </head>
+        <body>
           <h1>WhatsApp Web Server</h1>
-          <p>Escanea el siguiente código QR:</p>
-          <img src="${qrImage}" style="width: 300px; height: 300px;"/>
-          <p>Estado: ${JSON.stringify(connectionStatus, null, 2)}</p>
-        </div>
+          <div class="qr-container">
+            <p>Scan this QR code with WhatsApp on your phone:</p>
+            <img src="${qrImage}" style="width: 300px; height: 300px;"/>
+          </div>
+          <div class="status">
+            <h3>Connection Status</h3>
+            <pre>${JSON.stringify(connectionStatus, null, 2)}</pre>
+          </div>
+        </body>
+        </html>
       `);
     });
   } catch (err) {
-    logger.error('Error generando QR:', err);
+    logger.error('Error generating QR code:', err);
   }
 });
 
 // Evento de autenticación
 client.on('authenticated', async (session) => {
   connectionStatus.isAuthenticated = true;
-  logger.info('Autenticación exitosa');
+  connectionStatus.qrGenerated = false;
+  logger.info('Authenticated successfully');
   await saveSession(session);
 });
 
-// Evento de carga de sesión
+// Evento de carga
 client.on('loading_screen', (percent, message) => {
   connectionStatus.isSyncing = true;
-  logger.info(`Sincronizando: ${percent}% - ${message}`);
+  logger.info(`Loading: ${percent}% - ${message}`);
 });
 
-// Evento ready mejorado
-client.on('ready', async () => {
+// Evento ready
+client.on('ready', () => {
   connectionStatus.isConnected = true;
   connectionStatus.isAuthenticated = true;
   connectionStatus.isSyncing = false;
   connectionStatus.lastSync = new Date();
+  connectionStatus.qrGenerated = false;
   
-  logger.info('WhatsApp listo y conectado');
-  
-  // Guardar la sesión
-  const session = client.authStrategy?.state || null;
-  await saveSession(session);
+  logger.info('WhatsApp client is ready');
 });
 
 // Evento de cambio de estado
 client.on('change_state', (state) => {
-  logger.info('Cambio de estado:', state);
+  logger.info('State changed:', state);
   connectionStatus.isConnected = state === 'CONNECTED';
 });
 
-// Manejo de desconexión
+// Evento de desconexión
 client.on('disconnected', (reason) => {
   connectionStatus.isConnected = false;
-  logger.warn('WhatsApp desconectado:', reason);
+  connectionStatus.isAuthenticated = false;
+  logger.warn('Disconnected:', reason);
   
   // Reintentar conexión después de 10 segundos
   setTimeout(() => {
-    logger.info('Reintentando conexión...');
+    logger.info('Attempting to reconnect...');
     client.initialize().catch(err => {
-      logger.error('Error al reintentar conexión:', err);
+      logger.error('Reconnection error:', err);
     });
   }, 10000);
 });
 
-// Evento de error
-client.on('auth_failure', (msg) => {
-  connectionStatus.isAuthenticated = false;
-  logger.error('Fallo de autenticación:', msg);
-});
-
-// Ruta para verificar estado
+// Ruta de estado
 app.get('/status', (req, res) => {
   res.json({
-    status: connectionStatus,
+    status: 'OK',
+    whatsapp: connectionStatus,
     timestamp: new Date(),
     uptime: process.uptime()
   });
 });
 
-// Ruta mejorada para enviar mensaje
+// Ruta para enviar mensaje
 app.post('/send-message', async (req, res) => {
   if (!connectionStatus.isConnected) {
     return res.status(503).json({ 
-      error: 'WhatsApp no está conectado',
+      error: 'WhatsApp is not connected',
       status: connectionStatus 
     });
   }
@@ -238,8 +255,11 @@ app.post('/send-message', async (req, res) => {
   const { number, message } = req.body;
   if (!number || !message) {
     return res.status(400).json({ 
-      error: 'Número y mensaje son requeridos',
-      example: { number: '5491112345678', message: 'Hola mundo' }
+      error: 'Number and message are required',
+      example: { 
+        number: '5491112345678', 
+        message: 'Hello from WhatsApp server' 
+      }
     });
   }
 
@@ -247,7 +267,7 @@ app.post('/send-message', async (req, res) => {
     const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
     const sentMsg = await client.sendMessage(chatId, message);
     
-    logger.info('Mensaje enviado', { 
+    logger.info('Message sent', { 
       to: chatId,
       messageId: sentMsg.id._serialized 
     });
@@ -258,14 +278,11 @@ app.post('/send-message', async (req, res) => {
       timestamp: new Date()
     });
   } catch (err) {
-    logger.error('Error enviando mensaje:', { 
-      error: err.message,
-      stack: err.stack 
-    });
+    logger.error('Error sending message:', err);
     
     res.status(500).json({ 
       error: err.message,
-      details: 'Verifica que el número tenga formato correcto (ej: 5491112345678)'
+      details: 'Make sure the number has the correct format (e.g., 5491112345678)'
     });
   }
 });
@@ -273,36 +290,20 @@ app.post('/send-message', async (req, res) => {
 // Ruta para reiniciar la conexión
 app.post('/restart', async (req, res) => {
   try {
-    logger.info('Reiniciando conexión de WhatsApp...');
+    logger.info('Restarting WhatsApp connection...');
     await client.destroy();
     await client.initialize();
-    res.json({ success: true, message: 'Reinicio iniciado' });
+    res.json({ 
+      success: true, 
+      message: 'Restart initiated' 
+    });
   } catch (err) {
-    logger.error('Error al reiniciar:', err);
-    res.status(500).json({ error: err.message });
+    logger.error('Restart error:', err);
+    res.status(500).json({ 
+      error: err.message 
+    });
   }
 });
-
-// Inicialización del servidor
-async function startServer() {
-  await initializeDatabase();
-  
-  // Cargar sesión existente
-  const savedSession = await loadSession();
-  if (savedSession) {
-    logger.info('Sesión anterior encontrada');
-  }
-
-  const PORT = process.env.PORT || 10000;
-  app.listen(PORT, () => {
-    logger.info(`Servidor corriendo en puerto ${PORT}`);
-    
-    // Inicializar WhatsApp después de que el servidor esté listo
-    client.initialize().catch(err => {
-      logger.error('Error al inicializar WhatsApp:', err);
-    });
-  });
-}
 
 // Manejo de errores no capturados
 process.on('unhandledRejection', (reason, promise) => {
@@ -314,8 +315,34 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-// Iniciar el servidor
-startServer().catch(err => {
-  logger.error('Error al iniciar el servidor:', err);
-  process.exit(1);
-});
+// Inicialización del servidor
+async function startServer() {
+  try {
+    // Crear directorio de logs si no existe
+    if (!fs.existsSync(path.join(__dirname, 'logs'))) {
+      fs.mkdirSync(path.join(__dirname, 'logs'));
+    }
+
+    // Crear directorio de sesiones si no existe
+    if (!fs.existsSync(path.join(__dirname, 'sessions'))) {
+      fs.mkdirSync(path.join(__dirname, 'sessions'));
+    }
+
+    await initializeDatabase();
+    
+    const PORT = process.env.PORT || 10000;
+    app.listen(PORT, () => {
+      logger.info(`Server running on port ${PORT}`);
+      
+      // Inicializar cliente de WhatsApp
+      client.initialize().catch(err => {
+        logger.error('WhatsApp initialization error:', err);
+      });
+    });
+  } catch (err) {
+    logger.error('Server startup error:', err);
+    process.exit(1);
+  }
+}
+
+startServer();
