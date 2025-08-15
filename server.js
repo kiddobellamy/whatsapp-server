@@ -1,12 +1,14 @@
 import express from 'express';
 import qrcode from 'qrcode';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import pkg from 'whatsapp-web.js';
+const { Client, LocalAuth } = pkg;
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import winston from 'winston';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import expressStatusMonitor from 'express-status-monitor';
+import fs from 'fs';
 
 // Configuración de entorno
 dotenv.config();
