@@ -13,9 +13,12 @@ let qrCodeData = null;
 let clientStatus = 'INITIALIZING';
 let lastStatusUpdate = new Date().toISOString();
 
-// Configuración de PostgreSQL
+// Configuración de Supabase PostgreSQL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_FwNutc2nlxo3@ep-empty-star-aeqb2pfu-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
+  connectionString: process.env.SUPABASE_DB_URL || 'postgresql://postgres.icdsktzqtavtvzhlmtqz:9MuVYd7fQFhJtbko@db.icdsktzqtavtvzhlmtqz.supabase.co:5432/postgres',
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 // Crear tabla si no existe
@@ -29,14 +32,14 @@ async function initDatabase() {
           updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    console.log('✅ Tabla de sesiones inicializada');
+    console.log('✅ Tabla de sesiones inicializada en Supabase');
   } catch (err) {
     console.error('❌ Error inicializando base de datos:', err);
   }
 }
 
-// Store personalizado para RemoteAuth con PostgreSQL
-class PostgreSQLStore {
+// Store personalizado para RemoteAuth con Supabase
+class SupabaseStore {
   async sessionExists(options) {
     try {
       const sessionId = options.sessionId || 'default-session';
@@ -74,7 +77,7 @@ class PostgreSQLStore {
         [sessionId, sessionData]
       );
       
-      console.log(`💾 Sesión ${sessionId} guardada en PostgreSQL`);
+      console.log(`💾 Sesión ${sessionId} guardada en Supabase`);
     } catch (err) {
       console.error('❌ Error guardando sesión:', err);
     }
@@ -89,7 +92,7 @@ class PostgreSQLStore {
       );
       
       if (result.rows.length > 0 && result.rows[0].session_data) {
-        console.log(`✅ Sesión ${sessionId} cargada desde PostgreSQL`);
+        console.log(`✅ Sesión ${sessionId} cargada desde Supabase`);
         return result.rows[0].session_data;
       }
       
@@ -105,15 +108,15 @@ class PostgreSQLStore {
     try {
       const sessionId = options.sessionId || 'default-session';
       await pool.query('DELETE FROM whatsapp_sessions WHERE id = $1', [sessionId]);
-      console.log(`🗑️ Sesión ${sessionId} eliminada`);
+      console.log(`🗑️ Sesión ${sessionId} eliminada de Supabase`);
     } catch (err) {
       console.error('❌ Error eliminando sesión:', err);
     }
   }
 }
 
-// Configuración del cliente de WhatsApp con RemoteAuth + PostgreSQL
-const store = new PostgreSQLStore();
+// Configuración del cliente de WhatsApp con RemoteAuth + Supabase
+const store = new SupabaseStore();
 const client = new Client({
   authStrategy: new RemoteAuth({
     store: store,
@@ -197,7 +200,7 @@ client.on('message', (msg) => {
 });
 
 client.on('remote_session_saved', () => {
-  console.log('💾 Sesión remota guardada automáticamente');
+  console.log('💾 Sesión remota guardada automáticamente en Supabase');
 });
 
 // Rutas del servidor
@@ -220,6 +223,7 @@ app.get('/', async (req, res) => {
             .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
             .qr { background: #cce5ff; color: #004085; border: 1px solid #99ccff; }
             .session-info { background: #e7f3ff; padding: 10px; border-radius: 5px; margin: 10px 0; }
+            .supabase-info { background: #f0fff0; padding: 10px; border-radius: 5px; margin: 10px 0; border: 1px solid #90EE90; }
             img { max-width: 100%; height: auto; margin: 20px 0; }
             .info { margin: 10px 0; }
         </style>
@@ -233,14 +237,18 @@ app.get('/', async (req, res) => {
             <div class="info">
                 <strong>Última actualización:</strong> ${lastStatusUpdate}
             </div>
+            <div class="supabase-info">
+                <strong>🗄️ Base de datos:</strong> Supabase PostgreSQL
+                <br><strong>🔄 Backup automático:</strong> Cada 5 minutos
+            </div>
             <div class="session-info">
-                <strong>Sesión persistente:</strong> ${hasSession ? '✅ Guardada en PostgreSQL' : '❌ No encontrada'}
+                <strong>Sesión persistente:</strong> ${hasSession ? '✅ Guardada en Supabase' : '❌ No encontrada'}
             </div>
             ${qrCodeData ? `
                 <div class="qr">
                     <h3>📱 Escanea este código QR con WhatsApp:</h3>
                     <img src="${qrCodeData}" alt="QR Code"/>
-                    <p><em>Esta sesión se guardará permanentemente</em></p>
+                    <p><strong>🔒 Esta sesión se guardará permanentemente en Supabase</strong></p>
                     <p><em>La página se actualiza automáticamente cada 5 segundos</em></p>
                 </div>
             ` : ''}
@@ -252,6 +260,7 @@ app.get('/', async (req, res) => {
                 <li><code>POST /logout</code> - Cerrar sesión</li>
                 <li><code>POST /reset</code> - Resetear sesión</li>
                 <li><code>GET /session-info</code> - Info de sesión</li>
+                <li><code>GET /database-test</code> - Test conexión Supabase</li>
             </ul>
         </div>
     </body>
@@ -285,15 +294,42 @@ function getStatusMessage(status) {
   return messages[status] || status;
 }
 
+// Ruta para test de conexión a Supabase
+app.get('/database-test', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW(), version()');
+    res.json({
+      success: true,
+      message: 'Conexión a Supabase exitosa',
+      timestamp: result.rows[0].now,
+      version: result.rows[0].version.split(' ')[0] + ' ' + result.rows[0].version.split(' ')[1],
+      database: 'Supabase PostgreSQL'
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: 'Error conectando a Supabase',
+      details: err.message
+    });
+  }
+});
+
 // Ruta para info de sesión
 app.get('/session-info', async (req, res) => {
   try {
     const hasSession = await store.sessionExists({ sessionId: 'whatsapp-main-session' });
+    const dbResult = await pool.query('SELECT created_at, updated_at FROM whatsapp_sessions WHERE id = $1', ['whatsapp-main-session']);
+    
     res.json({
       hasSession,
       sessionId: 'whatsapp-main-session',
-      storage: 'PostgreSQL (Neon)',
-      persistent: true
+      storage: 'Supabase PostgreSQL',
+      persistent: true,
+      project: 'icdsktzqtavtvzhlmtqz.supabase.co',
+      sessionData: dbResult.rows.length > 0 ? {
+        createdAt: dbResult.rows[0].created_at,
+        updatedAt: dbResult.rows[0].updated_at
+      } : null
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -309,7 +345,8 @@ app.get('/status', async (req, res) => {
     hasQR: !!qrCodeData,
     isReady: clientStatus === 'READY',
     hasSession,
-    persistent: true
+    persistent: true,
+    storage: 'Supabase'
   });
 });
 
@@ -341,7 +378,8 @@ app.post('/send-message', async (req, res) => {
     res.json({ 
       success: true,
       message: 'Mensaje enviado correctamente',
-      to: number
+      to: number,
+      storage: 'Supabase'
     });
   } catch (err) {
     console.error('❌ Error enviando mensaje:', err);
@@ -392,6 +430,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     whatsappStatus: clientStatus,
+    database: 'Supabase',
     timestamp: new Date().toISOString()
   });
 });
@@ -400,9 +439,18 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log(`🌐 Servidor ejecutándose en puerto ${PORT}`);
+  console.log(`🗄️ Conectando a Supabase: icdsktzqtavtvzhlmtqz.supabase.co`);
   
   // Inicializar base de datos
   await initDatabase();
+  
+  // Test de conexión
+  try {
+    const result = await pool.query('SELECT NOW()');
+    console.log(`✅ Conexión a Supabase exitosa: ${result.rows[0].now}`);
+  } catch (err) {
+    console.error('❌ Error conectando a Supabase:', err);
+  }
   
   // Inicializar WhatsApp
   console.log('🔄 Inicializando cliente de WhatsApp...');
